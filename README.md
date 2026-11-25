@@ -1,4 +1,4 @@
-# ST-Charta（用户设定整理）
+# ST-Charta（ST-素笺）
 
 一个纯前端扩展，整理酒馆的「用户设定管理」（Persona Management）面板。
 
