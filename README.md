@@ -12,7 +12,11 @@
 
 ## 安装
 
-把本目录放到：
+### 方法一：酒馆一键安装（推荐）
+打开SillyTavern，点击顶部菜单的**“扩展”**。
+点击 Install Extension（安装扩展）。
+粘贴本仓库的链接，点击确认即可。
+### 方法二：把本目录放到：
 
 ```
 public/scripts/extensions/third-party/ST-Charta/
