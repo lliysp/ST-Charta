@@ -32,7 +32,7 @@ public/scripts/extensions/third-party/ST-Charta/
 
 - 点击人设行（按钮以外的地方）：**只切换为该人设**，停在列表里；进编辑器走 `⋯ → 进入编辑`。
 - 行尾图标：`★` 置顶 / `链接` 快捷绑定（点一下把这个人设绑到当前打开的角色，等同于原生「角色」锁；已绑定时会提示）/ `骷髅` 删除（原生确认弹窗）/ `⋯` 更多。
-- 卡片的第二行「当前链接」会写出具体名字：`角色 · 测试9`、`群组 · 某某团`、`默认`、`聊天`，没绑定时显示 `—`。
+- 卡片的第二行「当前链接」会写出具体名字：`角色 · 测试9`、`群组 · 某某团`、`默认`、`聊天`，没绑定时显示 `—`。角色改名时会自动把连接从旧头像文件名迁移到新文件名，并清掉指向已删除角色 / 群组的失效连接。
 - `⋯` 菜单：**移动到文件夹… / 重命名 / 复制一份 / 单独导出 / 进入编辑**。删除只走骷髅，菜单里不再重复。
 - `单独导出`：一个人设导成一个 JSON，结构与原生「备份」完全一致（`personas` + `persona_descriptions`），可以直接用原生「恢复」导入到别的酒馆。
 - 顶部「文件夹」按钮：新建文件夹（新文件夹会以空分组出现在列表里，可直接把人设拖进去）。
@@ -94,7 +94,9 @@ public/scripts/extensions/third-party/ST-Charta/
 - 窄屏两屏模式由 JS 判定后给 `<body>` 打 `.charta-narrow`，且**显隐直接写成内联 `!important`**，不依赖样式表是否命中或被缓存；两列在窄屏下都是 `position: absolute; inset: 0`，谁显示谁铺满，不参与 flex 宽度计算。
 - 判定阈值：视口 ≤1000px，或触摸设备（`coarse` / `maxTouchPoints > 0`）≤1400px，避免手机布局视口被算大后两屏模式不触发。
 - 下拉菜单挂在抽屉内部（`.openDrawer` 的后代），并在自身 `touchstart` / `mousedown` 上阻止冒泡。酒馆在 `<html>` 上监听这两个事件，点到抽屉之外就会把整个抽屉收起——菜单若挂在 `body`，点菜单项会被当成「点了外面」，抽屉先收起来、事件才迟到。
-- 标题右侧有一个很淡的版本标签：`v1.1.3 · 双屏` / `v1.1.3 · 单页`。悬停能看到当前判定用的宽度、`coarse`、`touch` 值，用来确认手机加载到的是哪一版、走的是哪套布局。
+- 标题右侧有一个很淡的版本标签：`v1.1.6 · 双屏` / `v1.1.6 · 单页`。悬停能看到当前判定用的宽度、`coarse`、`touch` 值，用来确认手机加载到的是哪一版、走的是哪套布局。
+- 原生编辑区只在 `#your_name`、`#persona_connections_list`、`#persona_connections_info_block`、`#persona_connections_buttons` 这几个局部节点上挂 `MutationObserver`，不监听 `body` / 文档，也不监听自己渲染的列表，因此不会出现「观察 → 刷新 → 再触发观察」的死循环。
+- 列表重绘会保存并恢复滚动位置；搜索 / 排序才主动回到顶部。移动端打开系统相册选择头像期间会暂停列表重绘，避免浏览器把相册取消。
 - 启动先探测 `#persona-management-block`、`.persona_management_left_column`、`.persona_management_right_column`、`#user_avatar_block`；任一缺失就**完全不接管**，控制台警告，原生面板照旧可用。
 - 所有样式以 `body.charta-on` 作用域，脚本没跑起来时不会隐藏任何原生元素。
 - 依赖的外部接口仅：`SillyTavern.getContext()`（`extensionSettings`、`saveSettingsDebounced`、`getRequestHeaders`、`powerUserSettings`、`eventSource`、`executeSlashCommandsWithOptions`、`callGenericPopup`、`getThumbnailUrl`、`accountStorage`）与 `POST /api/avatars/get`。
@@ -105,7 +107,8 @@ public/scripts/extensions/third-party/ST-Charta/
 2. **星标优先于文件夹**：加了星标的人设只在「★ 置顶」出现，不会同时出现在它的文件夹里（你要求的「飞上去」）。取消星标后自动回到原文件夹。
 3. **桌面端布局未改**：仍是原生左右两栏比例，只重做了列表卡片；两级视图只在 ≤1000px（触摸设备 ≤1400px）生效。
 4. **重命名**：列表菜单的「重命名」只改显示名；要同时改「标题」请进编辑视图用原生铅笔按钮。
-5. 依赖原生 `#user_avatar_block .avatar-container` 的点击委托；若酒馆未来改成其它选中入口，会自动走 slash 命令回退，但会多一次 toast。
+5. **角色改名 / 连接**：角色改名后，本扩展会把所有人设里指向旧头像的连接改到新头像；打开面板时也会清理已删除角色 / 群组的失效连接。原生右列改描述、名字、标题、默认 / 角色 / 聊天连接后，列表会自动刷新，不用按 F5。
+6. 依赖原生 `#user_avatar_block .avatar-container` 的点击委托；若酒馆未来改成其它选中入口，会自动走 slash 命令回退，但会多一次 toast。
 
 ## 性能
 

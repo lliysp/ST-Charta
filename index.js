@@ -19,7 +19,7 @@
 
     const EXT_ID = 'ST-Charta';
     const LOG = '[ST-Charta]';
-    const VERSION = '1.1.4';
+    const VERSION = '1.1.6';
     const TITLE_LIST = '用户设定管理';
     const TITLE_EDIT = '用户设定编辑';
     const NARROW_QUERY = '(max-width: 1000px)';
@@ -184,9 +184,22 @@
     };
 
     let bound = false;
-    let renderQueued = 0;
+    // reload（重新拉头像列表）和 repaint（只重读本地元数据）分开排队：
+    // 否则后到的 repaint 会把还没执行的 reload 取消掉。
+    let reloadQueued = 0;
+    let repaintQueued = 0;
+    // 移动端打开系统相册时，不要在相册还开着的时候重绘页面，否则部分浏览器会取消选择。
+    let refreshPausedUntil = 0;
     let pendingTarget = '';
     let activeCtx = null;
+
+    function pauseRefreshForPicker(ms = 4000) {
+        refreshPausedUntil = Math.max(refreshPausedUntil, Date.now() + ms);
+    }
+
+    function refreshPaused() {
+        return Date.now() < refreshPausedUntil;
+    }
 
     function readMeta(ids) {
         const ctx = getCtx();
@@ -222,6 +235,138 @@
         }
     }
 
+    /* ---------------- 连接修复 ----------------
+       酒馆的「角色」连接存的是头像文件名（avatar id）。角色改名后文件名会变，
+       但原生 1.19.0 不会把 persona_descriptions[*].connections 里的旧 id 迁移过去，
+       于是旧连接会一直留在数据里，列表上就会显示成旧角色名。
+
+       这里做三件事：
+       1) 收到 CHARACTER_RENAMED 时把旧 id 换成新 id；
+       2) 顺手去重（旧、新 id 同时存在时只保留一个）；
+       3) 人设列表加载完成后，清掉指向已不存在角色 / 群组的失效连接。
+    */
+
+    function personaDescriptionMap() {
+        const ctx = getCtx();
+        const map = ctx?.powerUserSettings?.persona_descriptions;
+        return map && typeof map === 'object' ? map : null;
+    }
+
+    function connectionKey(connection) {
+        return String(connection?.type) + '\u0000' + String(connection?.id);
+    }
+
+    function migrateCharacterConnections(oldAvatar, newAvatar) {
+        if (!oldAvatar || !newAvatar || oldAvatar === newAvatar) return false;
+
+        const ctx = getCtx();
+        const map = personaDescriptionMap();
+        if (!ctx || !map) return false;
+
+        let dirty = false;
+
+        for (const descriptor of Object.values(map)) {
+            if (!descriptor || !Array.isArray(descriptor.connections)) continue;
+
+            const next = [];
+            const seen = new Set();
+            let changed = false;
+
+            for (const original of descriptor.connections) {
+                let connection = original;
+                if (!connection || typeof connection !== 'object') {
+                    changed = true;
+                    continue;
+                }
+
+                if (connection.type === 'character' && connection.id === oldAvatar) {
+                    connection = { ...connection, id: newAvatar };
+                    changed = true;
+                }
+
+                const key = connectionKey(connection);
+                if (seen.has(key)) {
+                    changed = true;
+                    continue;
+                }
+                seen.add(key);
+                next.push(connection);
+            }
+
+            if (changed) {
+                descriptor.connections = next;
+                dirty = true;
+            }
+        }
+
+        if (dirty) ctx.saveSettingsDebounced?.();
+        return dirty;
+    }
+
+    // 角色改名会先触发事件、再刷新 characters 列表。刷新完成前不能清理「未知」连接，
+    // 否则刚迁移过去的新 id 会被当成失效项删掉。
+    let connectionSweepBlockedUntil = 0;
+
+    function sweepConnections() {
+        if (Date.now() < connectionSweepBlockedUntil) return false;
+
+        const ctx = getCtx();
+        const map = personaDescriptionMap();
+        if (!ctx || !map) return false;
+
+        const characters = Array.isArray(ctx.characters) ? ctx.characters : [];
+        // characters 还没加载完（或确实一个角色都没有）时不清理，避免误删有效连接。
+        if (!characters.length) return false;
+
+        const characterIds = new Set(characters.map((c) => c?.avatar).filter(Boolean));
+        const groups = Array.isArray(ctx.groups) ? ctx.groups : [];
+        const groupIds = new Set(groups.map((g) => String(g?.id)).filter(Boolean));
+        const groupsKnown = groups.length > 0;
+
+        let dirty = false;
+
+        for (const descriptor of Object.values(map)) {
+            if (!descriptor || !Array.isArray(descriptor.connections)) continue;
+
+            const next = [];
+            const seen = new Set();
+            let changed = false;
+
+            for (const connection of descriptor.connections) {
+                if (!connection || typeof connection !== 'object' || !connection.type || !connection.id) {
+                    changed = true;
+                    continue;
+                }
+
+                const key = connectionKey(connection);
+                if (seen.has(key)) {
+                    changed = true;
+                    continue;
+                }
+                seen.add(key);
+
+                if (connection.type === 'character' && !characterIds.has(connection.id)) {
+                    changed = true;
+                    continue;
+                }
+                if (connection.type === 'group' && groupsKnown && !groupIds.has(String(connection.id))) {
+                    changed = true;
+                    continue;
+                }
+
+                next.push(connection);
+            }
+
+            if (changed) {
+                descriptor.connections = next;
+                dirty = true;
+            }
+        }
+
+        if (dirty) ctx.saveSettingsDebounced?.();
+        return dirty;
+    }
+
     function reconcile() {
         let dirty = false;
         const alive = new Set(cache.avatars);
@@ -236,12 +381,14 @@
             settings.current = '';
             dirty = true;
         }
+        sweepConnections();
         if (dirty) save();
     }
 
     async function reload(delay = 60) {
-        clearTimeout(renderQueued);
-        renderQueued = setTimeout(async () => {
+        clearTimeout(reloadQueued);
+        reloadQueued = setTimeout(async () => {
+            if (refreshPaused()) return;
             const list = await fetchAvatars();
             if (list) {
                 cache.avatars = list;
@@ -255,10 +402,13 @@
     }
 
     function repaint(delay = 120) {
-        clearTimeout(renderQueued);
-        renderQueued = setTimeout(() => {
+        clearTimeout(repaintQueued);
+        repaintQueued = setTimeout(() => {
+            if (refreshPaused()) return;
             if (cache.avatars.length) readMeta(cache.avatars);
-            renderLimit = PAGE_SIZE;
+            sweepConnections();
+            // 不重置 renderLimit：只是元数据 / 连接变化，保留用户已经滚动加载出来的行数，
+            // 避免在编辑描述时列表反复跳回前 60 条。
             detectCurrent();
             render();
         }, delay);
@@ -490,10 +640,20 @@
         for (const connection of connections) {
             if (connection?.type === 'character') {
                 const character = characters.find((c) => c?.avatar === connection.id);
-                parts.push('角色 · ' + (character?.name || stripExt(connection.id)));
+                if (character) {
+                    parts.push('角色 · ' + character.name);
+                } else if (Date.now() < connectionSweepBlockedUntil) {
+                    // 角色刚改名：原生 characters 列表还没换过来，先用新文件名占位。
+                    parts.push('角色 · ' + stripExt(connection.id));
+                }
+                // 其余情况是失效连接：不再把旧角色名显示出来，稍后 sweepConnections 会删掉。
             } else if (connection?.type === 'group') {
                 const group = groups.find((g) => String(g?.id) === String(connection.id));
-                parts.push('群组 · ' + (group?.name || connection.id));
+                if (group) {
+                    parts.push('群组 · ' + group.name);
+                } else if (!groups.length) {
+                    parts.push('群组 · ' + connection.id);
+                }
             }
         }
 
@@ -521,6 +681,9 @@
             toast('这个人设还没有描述数据，先到编辑页保存一次', '人设连接', 'warning');
             return;
         }
+
+        // 先把指向已删除角色 / 群组的旧连接清掉，避免「旧名 + 新名」同时出现。
+        sweepConnections();
 
         descriptor.connections = Array.isArray(descriptor.connections) ? descriptor.connections : [];
         const already = descriptor.connections.some((c) => c?.type === 'character' && c?.id === character.avatar);
@@ -849,13 +1012,25 @@
     const PAGE_SIZE = 60;
     let renderLimit = PAGE_SIZE;
     let lastRowTotal = 0;
+    // 列表是独立滚动容器。重绘会清空子节点，所以要把滚动位置记在 JS 里再恢复。
+    let listScrollTop = 0;
+    let listScrollLeft = 0;
 
-    function render() {
+    function render({ keepScroll = true } = {}) {
         if (!bound) return;
         const list = byId('charta-persona-list');
         const pager = byId('charta-pager');
         const countNode = byId('charta-count');
         if (!list) return;
+
+        if (!keepScroll) {
+            listScrollTop = 0;
+            listScrollLeft = 0;
+        } else if (list.clientHeight > 0) {
+            // 可见时以 DOM 当前值为准；隐藏时沿用上次记录的值。
+            listScrollTop = list.scrollTop;
+            listScrollLeft = list.scrollLeft;
+        }
 
         activeCtx = getCtx();
 
@@ -905,6 +1080,16 @@
         list.appendChild(fragment);
         list.classList.toggle('charta-grid', settings.grid === true);
 
+        // 恢复滚动位置（内容变短时浏览器会自动夹到最大值）。
+        // 搜索 / 排序明确要求回顶部时，这里把滚动条复位。
+        if (!keepScroll) {
+            list.scrollTop = 0;
+            list.scrollLeft = 0;
+        } else if (listScrollTop || listScrollLeft) {
+            list.scrollTop = listScrollTop;
+            list.scrollLeft = listScrollLeft;
+        }
+
         if (countNode) countNode.textContent = '共 ' + total + ' 个';
         if (pager) pager.textContent = cache.query.trim() ? '匹配 ' + total + ' 个' : '';
         pager?.classList.toggle('is-hidden', !cache.query.trim());
@@ -947,6 +1132,15 @@
 
         const target = edit ? right : left;
         if (target) target.scrollTop = 0;
+
+        // 从编辑页返回列表时，把列表自己的滚动位置恢复回去。
+        if (!edit) {
+            const list = byId('charta-persona-list');
+            if (list) {
+                list.scrollTop = listScrollTop;
+                list.scrollLeft = listScrollLeft;
+            }
+        }
     }
 
     function currentView() {
@@ -1035,6 +1229,9 @@
             // 无限滚动：滚到底部再追加一批（不打断分组、不用页码）
             let loadingMore = false;
             list.addEventListener('scroll', () => {
+                listScrollTop = list.scrollTop;
+                listScrollLeft = list.scrollLeft;
+
                 if (loadingMore) return;
                 if (list.scrollTop + list.clientHeight < list.scrollHeight - 160) return;
                 if (renderLimit >= lastRowTotal) return;
@@ -1058,7 +1255,10 @@
             back.tabIndex = 0;
             back.appendChild(el('i', 'fa-solid fa-chevron-left'));
             back.appendChild(el('span', '', '返回列表'));
-            back.addEventListener('click', () => setView('list'));
+            back.addEventListener('click', () => {
+                setView('list');
+                repaint(0);
+            });
             back.addEventListener('keydown', (event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault();
@@ -1067,6 +1267,50 @@
             });
             right.insertBefore(back, right.firstChild);
         }
+    }
+
+    /**
+     * 原生右列不是所有操作都会发事件（例如「角色 / 聊天 / 默认」连接切换只改内存，
+     * 不发 PERSONA_UPDATED），所以要直接观察原生编辑器。
+     *
+     * 注意：这里只观察几个具体的原生节点，绝不观察 body / 文档，也不观察我们自己渲染的
+     * 列表；而 repaint() 只写 #charta-persona-list，不写这些原生节点，所以不会形成
+     * 「观察 -> 刷新 -> 再触发观察」的死循环。
+     */
+    const watchedNodes = new WeakSet();
+
+    function watchNativePersonaEditor() {
+        const right = panel()?.querySelector('.persona_management_right_column');
+        if (!right) return;
+
+        const kick = debounce(() => repaint(80), 180);
+
+        // 描述 / 位置 / 深度输入：原生会发 PERSONA_UPDATED，但这里再兜一层。
+        if (right.dataset.chartaInput !== '1') {
+            right.dataset.chartaInput = '1';
+            right.addEventListener('input', kick, true);
+            right.addEventListener('change', kick, true);
+        }
+
+        if (typeof MutationObserver !== 'function') return;
+
+        const observe = (node, options) => {
+            if (!node || watchedNodes.has(node)) return;
+            watchedNodes.add(node);
+            const observer = new MutationObserver(() => kick());
+            observer.observe(node, options);
+        };
+
+        // 只盯会出现在列表里的信息：名字、连接列表、连接按钮状态。
+        observe(byId('your_name'), { childList: true, characterData: true, subtree: true });
+        observe(byId('persona_connections_list'), { childList: true, characterData: true, subtree: true });
+        observe(byId('persona_connections_info_block'), { childList: true, characterData: true, subtree: true });
+        observe(byId('persona_connections_buttons'), {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class'],
+        });
     }
 
     function takeoverControls() {
@@ -1078,7 +1322,7 @@
             search.addEventListener('input', debounce(() => {
                 cache.query = String(search.value || '');
                 renderLimit = PAGE_SIZE;
-                render();
+                render({ keepScroll: false });
                 // 原生 verifyPersonaSearchSortRule 可能把下拉切成 Search，稍后复原
                 window.setTimeout(() => {
                     const select = byId('persona_sort_order');
@@ -1095,7 +1339,7 @@
                 settings.sort = sort.value === 'desc' ? 'desc' : 'asc';
                 save();
                 renderLimit = PAGE_SIZE;
-                render();
+                render({ keepScroll: false });
             });
         }
 
@@ -1132,11 +1376,32 @@
                 if (events[name]) source.on(events[name], handler);
             };
 
-            on('PERSONA_CHANGED', (avatarId) => setCurrent(avatarId));
+            on('PERSONA_CHANGED', (avatarId) => {
+                setCurrent(avatarId);
+                repaint(0);
+            });
             on('PERSONA_CREATED', () => reload(200));
             on('PERSONA_RENAMED', () => reload(200));
             on('PERSONA_DELETED', () => reload(200));
-            on('PERSONA_UPDATED', () => repaint(300));
+            on('PERSONA_UPDATED', () => repaint(200));
+            on('CHARACTER_RENAMED', (oldAvatar, newAvatar) => {
+                const migrated = migrateCharacterConnections(oldAvatar, newAvatar);
+
+                if (migrated) {
+                    // 等原生 getCharacters() 把角色列表换成新文件名后再做一次清理。
+                    connectionSweepBlockedUntil = Date.now() + 5000;
+                    window.setTimeout(() => {
+                        connectionSweepBlockedUntil = 0;
+                        reload(0);
+                    }, 5000);
+                }
+
+                reload(150);
+            });
+            on('CHARACTER_DELETED', () => reload(400));
+            on('CHARACTER_EDITED', () => repaint(200));
+            on('GROUP_UPDATED', () => reload(200));
+            on('CHAT_CHANGED', () => repaint(200));
             on('SETTINGS_LOADED', () => {
                 loadSettings();
                 applySortValue();
@@ -1154,6 +1419,15 @@
                 reload(60);
             }, 0);
         });
+
+        // 换头像会打开系统相册；相册开着时暂停一切列表重绘，避免移动端浏览器把相册关掉。
+        document.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            if (target.closest('#persona_set_image_button, #avatar_upload_file, #user_avatar_block .avatar_upload')) {
+                pauseRefreshForPicker(5000);
+            }
+        }, true);
 
         document.addEventListener('click', (event) => {
             if (!openMenuNode) return;
@@ -1226,6 +1500,7 @@
         if (!bound) {
             loadSettings();
             injectChrome(left, right);
+            watchNativePersonaEditor();
             takeoverControls();
             bindEvents();
             syncNarrowClass();
