@@ -2,9 +2,9 @@
 /* ==================================================
    ST-Charta — 移动端键盘辅助（MVP）
    --------------------------------------------------
-   只处理一条已确认路径：
-     SillyTavern 原生 getChat() 在 CHAT_LOADED 后约 200ms
-     执行 $('#send_textarea').trigger('click').trigger('focus')
+   处理两条已确认路径：
+     1) getChat() 在 CHAT_LOADED 后约 200ms 自动聚焦 #send_textarea
+     2) displayPastChats() 在聊天管理界面打开后约 200ms 自动聚焦 #select_chat_search
 
    目标：触摸设备上，用户没有主动操作输入框时，取消这次自动焦点。
    不拦截全局 focus/focusin，不修改输入值/选区/属性，不处理其他来源。
@@ -16,6 +16,10 @@ const INSTALLED = Symbol.for('st-charta.keyboard-guard.installed');
 const OBSERVE_MS = 1200;
 const SEND_TEXTAREA = '#send_textarea';
 const FOCUS_KEEPING = '#send_but, #option_regenerate, #option_continue, #mes_continue, #mes_impersonate';
+
+const SEARCH_POPUP = '#select_chat_popup';
+const SEARCH_INPUT = '#select_chat_search';
+const SEARCH_INTENT_MS = 1000;
 
 /**
  * 只在“主输入方式是触摸、且没有 hover”的设备启用。
@@ -55,6 +59,11 @@ export function install() {
      */
     let active = null;
     let generation = 0;
+
+    let searchGuardBound = false;
+    let searchBindAttempts = 0;
+    let searchIntentAt = 0;
+    let searchBlurTimer = 0;
 
     function markIntent() {
         if (active) active.userIntent = true;
@@ -118,6 +127,85 @@ export function install() {
         textarea.addEventListener('click', clickHandler, true);
     }
 
+    /**
+     * 聊天管理弹窗内的搜索框：只记录“用户主动碰过搜索框”的证据。
+     * 监听挂在弹窗容器上，输入框即使后续被替换也能继续收到事件。
+     * @param {Event} event
+     */
+    function onSearchPointerDown(event) {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        if (!target.closest(SEARCH_INPUT)) return;
+
+        searchIntentAt = Date.now();
+
+        if (searchBlurTimer) {
+            window.clearTimeout(searchBlurTimer);
+            searchBlurTimer = 0;
+        }
+    }
+
+    /**
+     * 只处理 #select_chat_search 上由脚本触发的 click。
+     * 真实用户点击（isTrusted !== false）一律放行，不 blur。
+     * @param {MouseEvent} event
+     */
+    function onSearchClick(event) {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+
+        const search = target.closest(SEARCH_INPUT);
+        if (!search) return;
+
+        // 真实用户点击，或环境不支持 isTrusted：记录意图，绝不 blur。
+        if (event.isTrusted !== false) {
+            searchIntentAt = Date.now();
+            return;
+        }
+
+        // 原生 .trigger('click') 是脚本事件。
+        // 如果搜索框已经被用户聚焦，不要抢走焦点。
+        if (document.activeElement === search) return;
+
+        if (searchBlurTimer) {
+            window.clearTimeout(searchBlurTimer);
+            searchBlurTimer = 0;
+        }
+
+        // 等 trigger('click').trigger('focus').trigger('select') 同步链走完。
+        searchBlurTimer = window.setTimeout(() => {
+            searchBlurTimer = 0;
+
+            if (Date.now() - searchIntentAt < SEARCH_INTENT_MS) return;
+            if (document.visibilityState !== 'visible') return;
+            if (document.querySelector('dialog[open]')) return;
+            if (document.activeElement !== search) return;
+
+            search.blur();
+        }, 0);
+    }
+
+    /**
+     * 把监听挂到稳定的弹窗容器上，而不是搜索框本身。
+     * 容器尚未出现时做有限次重试，避免留下永久 observer/timer。
+     */
+    function bindSearchGuard() {
+        if (searchGuardBound) return;
+
+        const container = document.querySelector(SEARCH_POPUP);
+        if (container) {
+            searchGuardBound = true;
+            container.addEventListener('click', onSearchClick, true);
+            container.addEventListener('pointerdown', onSearchPointerDown, { capture: true, passive: true });
+            container.addEventListener('touchstart', onSearchPointerDown, { capture: true, passive: true });
+            return;
+        }
+
+        searchBindAttempts += 1;
+        if (searchBindAttempts >= 40) return;
+        window.setTimeout(bindSearchGuard, 250);
+    }
+
     // 只记录“用户主动输入”的证据；不 preventDefault，不改变焦点。
     const pointerIntent = (event) => {
         if (!active) return;
@@ -139,6 +227,8 @@ export function install() {
     document.addEventListener('keydown', typingIntent, true);
     document.addEventListener('beforeinput', typingIntent, true);
     document.addEventListener('compositionstart', typingIntent, true);
+
+    bindSearchGuard();
 
     let attempts = 0;
     const connect = () => {
