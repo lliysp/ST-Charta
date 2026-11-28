@@ -101,9 +101,11 @@ export function install() {
 
             if (active.userIntent) return;
 
-            // 让 trigger('click').trigger('focus') 的同步调用链先走完，
-            // 再确认焦点是否真的落在 #send_textarea 上。
-            window.setTimeout(() => {
+            // 原生 .trigger('click') 的下一步就是 .trigger('focus')，仍在同一个同步任务里。
+            // Blink 是在 focus() 内部、focus 事件派发完之后才发出软键盘显示请求的，
+            // 所以必须在 focus 事件里同步 blur；setTimeout / 微任务都发生在那之后，
+            // 只能和已经发出的显示请求赛跑（偶发闪现就是这么来的）。
+            const blurOnFocus = () => {
                 if (!active || active.token !== token) return;
                 if (active.userIntent) return;
                 if (document.visibilityState !== 'visible') return;
@@ -112,7 +114,13 @@ export function install() {
 
                 textarea.blur();
                 disarm();
-            }, 0);
+            };
+
+            // 用冒泡阶段（默认）：让酒馆自己的 #send_textarea focus 处理器先跑，
+            // 再由我们 blur，这样它的 blur 处理器能把 chatbarInFocus 正确复位。
+            textarea.addEventListener('focus', blurOnFocus);
+            // 原生链在本任务内完成；下一微任务就摘掉，避免影响之后真正的用户聚焦。
+            queueMicrotask(() => textarea.removeEventListener('focus', blurOnFocus));
         };
 
         active = {
