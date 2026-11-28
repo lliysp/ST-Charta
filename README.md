@@ -7,6 +7,7 @@
 - **文件夹**：单层，一个人设只属于一个文件夹；不属于任何文件夹的进「未分组」。
 - **星标**：独立「★ 置顶」区，点星标立刻飞到最上面。
 - **存储**：文件夹与星标写入服务端 `extension_settings`，随酒馆设置一起保存和备份，换浏览器 / 换手机 / 重装都不丢。
+- **移动端键盘**：避免酒馆在切换聊天等场景自动聚焦聊天输入框而弹软键盘（用户主动点击输入框不受影响；极低概率会出现一帧闪现，详见「移动端键盘辅助」）。
 
 ---
 
@@ -22,7 +23,7 @@
 public/scripts/extensions/third-party/ST-Charta/
 ```
 
-确认四个文件齐全：`manifest.json`、`index.js`、`style.css`、`README.md`，然后在酒馆「扩展」里确认 **ST-Charta (用户设定整理)** 已启用，刷新页面。
+确认五个文件齐全：`manifest.json`、`index.js`、`keyboard-guard.js`、`style.css`、`README.md`，然后在酒馆「扩展」里确认 **ST-Charta (用户设定整理)** 已启用，刷新页面。
 
 ---
 
@@ -88,6 +89,31 @@ public/scripts/extensions/third-party/ST-Charta/
 
 ---
 
+## 移动端键盘辅助（keyboard-guard.js）
+
+一个独立的纯前端小模块，只在触摸设备上安装（`navigator.maxTouchPoints > 0` 或 `(pointer: coarse)`），用来避免酒馆原生代码在用户没有主动点输入框时自动唤醒软键盘。它只处理两条已确认的原生自动聚焦路径：
+
+1. `getChat()` 在 `CHAT_LOADED` 事件后约 200ms 对 `#send_textarea` 执行 `.trigger('click').trigger('focus')`；
+2. `displayPastChats()` 在聊天管理界面打开后约 200ms 对 `#select_chat_search` 做同样的动作。
+
+### 做法
+
+- `CHAT_LOADED` 时只给 `#send_textarea` **元素本身**挂一个 1200ms 观察窗口；不监听文档级 `focus`/`focusin`，不修改输入值、选区或属性。
+- 原生脚本 focus 之前会先触发一次脚本 click（jQuery `.trigger('click')` 最终调用原生 `click()`，其 `isTrusted` 为 `false`，这是规范里唯一例外的 UA 事件）。捕获到这个 click 后，用 `setTimeout(0)` 在下一个任务里确认焦点确实落在 `#send_textarea`，再 `blur()`；`click` 与 `focus` 本身在同一个同步任务里完成，所以 `blur` 一定晚于 focus。
+- 因为 `blur` 晚于浏览器发出的“显示键盘”请求，它只能和键盘的显示抢时间：多数情况下键盘还没真正可见就被收起（用户无感），极少数情况下输入法先提交了一帧，就出现“闪现一帧再自动收起”（实测约 1/12）。把 `blur` 提前到微任务或 focus 事件里并没有消除它，因此保留 `setTimeout(0)`，作为已知的极低概率残余。
+- 所有抑制都要求窗口内没有任何用户意图：触摸 / 点击过可编辑元素或发送类按钮（`#send_but`、`#option_regenerate`、`#option_continue`、`#mes_continue`、`#mes_impersonate`），或按过键，都会直接放行。真实用户点击 `#send_textarea` 是 trusted click，直接走放行分支，不会被 blur。
+- 聊天管理搜索框走另一套监听：挂在弹窗容器 `#select_chat_popup` 上，带 1000ms 意图窗口，只在脚本 click 时 blur，真实点击一律放行。
+
+### 边界
+
+- 只覆盖上面两条原生路径；其他脚本主动调用 `focus()` 的场景不在拦截范围内。
+- 已知残余：聊天重载类操作（切换聊天、开关正则脚本等）仍可能极少量地闪现一帧软键盘（实测约 1/12，部分移动浏览器/WebView），随后自动收起；不影响输入，也不影响用户主动点击输入框。
+- 真实用户点击聊天输入框、发送按钮、快捷键聚焦都保持原生行为。
+- 非触摸设备不安装；同时接鼠标的触摸屏笔记本保持桌面行为。
+- 不修改 SillyTavern 原生代码，也不依赖酒馆内部变量，只用 `SillyTavern.getContext()` 的 `eventSource` / `eventTypes`。
+
+---
+
 ## 兼容性与降级
 
 - 面向 SillyTavern **1.19.0** 的 DOM 编写。
@@ -109,6 +135,7 @@ public/scripts/extensions/third-party/ST-Charta/
 4. **重命名**：列表菜单的「重命名」只改显示名；要同时改「标题」请进编辑视图用原生铅笔按钮。
 5. **角色改名 / 连接**：角色改名后，本扩展会把所有人设里指向旧头像的连接改到新头像；打开面板时也会清理已删除角色 / 群组的失效连接。原生右列改描述、名字、标题、默认 / 角色 / 聊天连接后，列表会自动刷新，不用按 F5。
 6. 依赖原生 `#user_avatar_block .avatar-container` 的点击委托；若酒馆未来改成其它选中入口，会自动走 slash 命令回退，但会多一次 toast。
+7. 移动端键盘辅助只覆盖两条原生自动聚焦路径（聊天加载后的 `#send_textarea`、聊天管理界面的 `#select_chat_search`）；其他脚本主动调用 `focus()` 的场景不在拦截范围内。
 
 ## 性能
 
