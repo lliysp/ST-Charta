@@ -1534,6 +1534,12 @@
     if (globalThis.__stChartaLoaded) return;
     globalThis.__stChartaLoaded = true;
 
+    // 移动端键盘辅助：独立于 boot()/bindEvents()，不依赖 Charta DOM。
+    // 只处理 CHAT_LOADED 后原生对 #send_textarea 的自动聚焦。
+    import('./keyboard-guard.js')
+        .then((module) => module.install())
+        .catch((error) => console.warn(LOG, '键盘辅助模块加载失败', error));
+
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init, { once: true });
     } else {
