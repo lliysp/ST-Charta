@@ -23,13 +23,9 @@ const FOCUS_KEEPING = '#send_but, #option_regenerate, #option_continue, #mes_con
  * @returns {boolean}
  */
 function isTouchDevice() {
-    if (typeof window.matchMedia !== 'function') return false;
-
-    const coarse = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
-    const touchOnly = (navigator.maxTouchPoints || 0) > 0
-        && window.matchMedia('(hover: none)').matches;
-
-    return coarse || touchOnly;
+    return navigator.maxTouchPoints > 0
+        || (typeof window.matchMedia === 'function'
+            && window.matchMedia('(pointer: coarse)').matches);
 }
 
 /**
