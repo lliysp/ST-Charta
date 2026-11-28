@@ -80,6 +80,7 @@ export function install() {
         const token = ++generation;
 
         const clickHandler = (event) => {
+            console.log('[KeyboardGuard] click captured:', event.isTrusted);
             if (!active || active.token !== token) return;
 
             // 真实用户点击是 trusted；原生 .trigger('click') 是脚本事件。
